@@ -26,3 +26,6 @@ def test_ar_grc(seq_len):
     loss = model(ids, return_loss = True)
 
     assert loss.ndim == 0
+
+    logits = model(ids, window_size = 64)
+    assert logits.shape == (2, seq_len, 16)

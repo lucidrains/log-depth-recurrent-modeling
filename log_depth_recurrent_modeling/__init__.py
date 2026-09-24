@@ -1,7 +1,13 @@
 from log_depth_recurrent_modeling.ar_grc import (
-    AutoregressiveGatedRecursiveCell
+    GatedRecursiveCell,
+    AutoregressiveGatedRecursiveCell,
+    GRC,
+    ARGRC
 )
 
 __all__ = [
-    'AutoregressiveGatedRecursiveCell'
+    'GatedRecursiveCell',
+    'AutoregressiveGatedRecursiveCell',
+    'GRC',
+    'ARGRC'
 ]
