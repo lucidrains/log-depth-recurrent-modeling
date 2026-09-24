@@ -15,3 +15,15 @@ Explorations into the [Log Depth Recurrent Modeling](https://arxiv.org/abs/2609.
     url      = {https://arxiv.org/abs/2609.28212}, 
 }
 ```
+
+```bibtex
+@misc{pert2026lengthgeneralizationlogdepthrecurrent,
+    title     = {Length Generalization with Log-Depth Recurrent Units}, 
+    author    = {Charles Pert and Dalal Alrajeh and Alessandra Russo},
+    year      = {2026},
+    eprint    = {2605.26035},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url       = {https://arxiv.org/abs/2605.26035}, 
+}
+```
