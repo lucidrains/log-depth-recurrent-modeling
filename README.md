@@ -1,6 +1,6 @@
 ## Log Depth Recurrent Modeling (wip)
 
-Explorations into the Log Depth Recurrent Modeling proposed by Yiqin Wang of Imperial College London
+Explorations into the [Log Depth Recurrent Modeling](https://arxiv.org/abs/2609.28212) proposed by Yiqin Wang of Imperial College London
 
 ## Citations
 
