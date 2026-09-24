@@ -24,6 +24,7 @@ classifiers = [
 dependencies = [
     "einops>=0.8.1",
     "torch>=2.5",
+    "torch-einops-utils>=0.1.30",
     "x-mlps-pytorch>=0.6.2"
 ]
 
