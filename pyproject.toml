@@ -1,6 +1,6 @@
 [project]
 name = "log-depth-recurrent-modeling"
-version = "0.0.2"
+version = "0.0.4"
 description = "Log Depth Recurrent Modeling"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }

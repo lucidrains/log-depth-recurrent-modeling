@@ -63,14 +63,13 @@ class AutoregressiveGatedRecursiveCell(Module):
         num_tokens,
         dim_embed,
         dim,
-        window_size,
+        max_seq_len: int | None = None,
         separate_grc = False,
         grc_kwargs: dict = dict()
     ):
         super().__init__()
 
-        tree_depth = math.log2(window_size)
-        assert tree_depth.is_integer()
+        assert not exists(max_seq_len) or (isinstance(max_seq_len, int) and max_seq_len >= 2 and math.log2(max_seq_len).is_integer())
 
         self.dim = dim
 
@@ -85,8 +84,7 @@ class AutoregressiveGatedRecursiveCell(Module):
 
         # recursive tree, up and down (blelloch scan)
 
-        self.window_size = window_size
-        self.tree_depth = int(tree_depth)
+        self.max_seq_len = max_seq_len
 
         self.root_hidden = nn.Parameter(torch.randn(dim) * 1e-2)
 
@@ -94,39 +92,13 @@ class AutoregressiveGatedRecursiveCell(Module):
         self.up_grc = GatedRecursiveCell(dim = dim, **grc_kwargs)
         self.down_grc = GatedRecursiveCell(dim = dim, **grc_kwargs) if separate_grc else self.up_grc
 
-    def resolve_window_and_depth(
-        self,
-        window_size = None,
-        tree_depth = None
-    ):
-        if not exists(window_size) and not exists(tree_depth):
-            return self.window_size, self.tree_depth
-
-        assert not exists(window_size) or (isinstance(window_size, int) and window_size >= 2 and math.log2(window_size).is_integer())
-        assert not exists(tree_depth) or (isinstance(tree_depth, int) and tree_depth >= 1)
-
-        if exists(window_size) and exists(tree_depth):
-            assert 2 ** tree_depth == window_size
-        elif exists(window_size):
-            tree_depth = int(math.log2(window_size))
-        else:
-            window_size = 2 ** tree_depth
-
-        return window_size, tree_depth
-
     def forward(
         self,
         ids,
         return_loss = False,
-        labels = None,
-        window_size: int | None = None,
-        tree_depth: int | None = None
+        labels = None
     ):
         up_grc, down_grc, root_hidden = self.up_grc, self.down_grc, self.root_hidden
-
-        # resolve and validate window_size and tree_depth
-
-        window_size, tree_depth = self.resolve_window_and_depth(window_size, tree_depth)
 
         if exists(labels):
             return_loss = True
@@ -137,6 +109,12 @@ class AutoregressiveGatedRecursiveCell(Module):
         embeds = self.token_embed(ids)
 
         x = self.embed_to_model(embeds)
+
+        # window size is `max_seq_len` when set, folding the sequence into windows
+        # otherwise, auto pad to the nearest power of two and scan the whole sequence in log depth
+
+        window_size = default(self.max_seq_len, 2 ** max(1, math.ceil(math.log2(x.shape[-2]))))
+        tree_depth = int(math.log2(window_size))
 
         x, remove_padding = pad_at_dim_to_multiple(x, multiple = window_size, dim = -2)
 

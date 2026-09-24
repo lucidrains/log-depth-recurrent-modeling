@@ -11,15 +11,16 @@ def test_grc():
 
     assert grc(x, y).shape == x.shape
 
-@pytest.mark.parametrize('seq_len', (32, 33))
-def test_ar_grc(seq_len):
+@pytest.mark.parametrize('max_seq_len', (None, 16))
+@pytest.mark.parametrize('seq_len', (32, 33, 100))
+def test_ar_grc(seq_len, max_seq_len):
     from log_depth_recurrent_modeling.ar_grc import ARGRC
 
     model = ARGRC(
         num_tokens = 16,
         dim_embed = 32,
         dim = 32,
-        window_size = 16
+        max_seq_len = max_seq_len
     )
 
     ids = torch.randint(0, 16, (2, seq_len))
@@ -27,5 +28,5 @@ def test_ar_grc(seq_len):
 
     assert loss.ndim == 0
 
-    logits = model(ids, window_size = 64)
+    logits = model(ids)
     assert logits.shape == (2, seq_len, 16)
