@@ -72,6 +72,8 @@ class AutoregressiveGatedRecursiveCell(Module):
         assert not exists(max_seq_len) or (isinstance(max_seq_len, int) and max_seq_len >= 2 and math.log2(max_seq_len).is_integer())
 
         self.dim = dim
+        self.dim_embed = dim_embed
+        self.logit_scale = dim_embed ** -0.5
 
         # embed
 
@@ -161,7 +163,7 @@ class AutoregressiveGatedRecursiveCell(Module):
 
         embeds = self.model_to_embed(x)
 
-        logits = einsum(embeds, self.token_embed.weight, 'b n d, l d -> b n l')
+        logits = einsum(embeds, self.token_embed.weight, 'b n d, l d -> b n l') * self.logit_scale
 
         if not return_loss:
             return logits
