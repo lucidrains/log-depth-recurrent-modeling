@@ -47,9 +47,7 @@ class GatedRecursiveCell(Module):
 
     def forward(self, x, y):
 
-        mlp_input = cat((x, y), dim = -1)
-
-        x_gate, y_gate, c_gate, c = self.mlp(mlp_input).chunk(4, dim = -1)
+        x_gate, y_gate, c_gate, c = self.mlp((x, y)).chunk(4, dim = -1)
 
         return self.norm(x * x_gate.sigmoid() + y * y_gate.sigmoid() + c_gate.sigmoid() * c)
 
