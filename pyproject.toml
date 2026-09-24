@@ -1,0 +1,65 @@
+[project]
+name = "log-depth-recurrent-modeling"
+version = "0.0.1"
+description = "Log Depth Recurrent Modeling"
+authors = [
+    { name = "Phil Wang", email = "lucidrains@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">= 3.10"
+license = { file = "LICENSE" }
+keywords = [
+    'artificial intelligence',
+    'deep learning'
+]
+
+classifiers = [
+    'Development Status :: 4 - Beta',
+    'Intended Audience :: Developers',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python :: 3.10',
+]
+
+dependencies = [
+    "einops>=0.8.1",
+    "torch>=2.5",
+    "x-mlps-pytorch>=0.6.2"
+]
+
+[project.urls]
+Homepage = "https://pypi.org/project/log-depth-recurrent-modeling/"
+Repository = "https://github.com/lucidrains/log-depth-recurrent-modeling"
+
+[project.optional-dependencies]
+examples = []
+test = [
+    "pytest"
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build]
+include = [
+    "log_depth_recurrent_modeling",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["log_depth_recurrent_modeling"]
