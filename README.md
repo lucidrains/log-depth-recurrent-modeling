@@ -18,22 +18,22 @@ from log_depth_recurrent_modeling import ARGRC
 
 model = ARGRC(
     num_tokens = 256,
-    dim = 512,
+    dim = 128,
     depth = 2,
     max_seq_len = 65536,
     shift_tokens = True
 )
 
-tokens = torch.randint(0, 256, (2, 65536))
+tokens = torch.randint(0, 256, (1, 65536))
 
-# forward with parallel blelloch scan in log depth
-
-logits = model(tokens) # (2, 65536, 256)
-
-# autoregressive cross entropy loss
+# autoregressive loss
 
 loss = model(tokens, return_loss = True)
 loss.backward()
+
+# forward for logits
+
+logits = model(tokens) # (1, 65536, 256)
 ```
 
 Standalone `ARGRCLayer`:
@@ -43,16 +43,16 @@ import torch
 from log_depth_recurrent_modeling import ARGRCLayer
 
 layer = ARGRCLayer(
-    dim = 512,
+    dim = 128,
     max_seq_len = 65536,
     prenorm = True,
     shift_tokens = True,
-    separate_grc = False # shares up and down grc
+    separate_grc = False # shares up and down gated recursive cell
 )
 
-x = torch.randn(2, 65536, 512)
+x = torch.randn(1, 65536, 128)
 
-out = layer(x) # (2, 65536, 512)
+out = layer(x) + x # (1, 65536, 128)
 ```
 
 ## Tasks
