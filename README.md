@@ -24,7 +24,7 @@ model = ARGRC(
     shift_tokens = True
 )
 
-tokens = torch.randint(0, 256, (1, 65536))
+tokens = torch.randint(0, 256, (1, 65535))
 
 # autoregressive loss
 
@@ -33,10 +33,10 @@ loss.backward()
 
 # forward for logits
 
-logits = model(tokens) # (1, 65536, 256)
+logits = model(tokens) # (1, 65535, 256)
 ```
 
-Standalone `ARGRCLayer`:
+Standalone `ARGRCLayer`, which automatically pads the sequence to a multiple of `max_seq_len` (or the next power of two if unset) and strips the padding from the output:
 
 ```python
 import torch
@@ -50,9 +50,9 @@ layer = ARGRCLayer(
     separate_grc = False # shares up and down gated recursive cell
 )
 
-x = torch.randn(1, 65536, 128)
+x = torch.randn(1, 65535, 128)
 
-out = layer(x) + x # (1, 65536, 128)
+out = layer(x) + x # (1, 65535, 128)
 ```
 
 ## Tasks

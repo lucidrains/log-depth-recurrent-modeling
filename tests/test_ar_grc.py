@@ -77,6 +77,32 @@ def test_argrc_layer_sequential_vs_parallel(prenorm, shift_tokens, max_seq_len):
     token_by_token_out = cat(token_outs, dim = 1)
     assert torch.allclose(parallel_out, token_by_token_out, atol = 1e-4)
 
+@pytest.mark.parametrize('max_seq_len', (None, 16))
+@pytest.mark.parametrize('seq_len', (23, 100))
+def test_argrc_layer_padding(seq_len, max_seq_len):
+    from log_depth_recurrent_modeling import ARGRCLayer
+
+    layer = ARGRCLayer(
+        dim = 32,
+        max_seq_len = max_seq_len,
+        prenorm = True,
+        shift_tokens = True
+    )
+
+    x = torch.randn(2, seq_len, 32)
+
+    out = layer(x)
+    assert out.shape == x.shape
+
+    # padding appended to the sequence should never affect the outputs of the real tokens
+
+    padded_x = cat((x, torch.randn(2, 9, 32)), dim = 1)
+
+    padded_out = layer(padded_x)
+    assert padded_out.shape == padded_x.shape
+
+    assert torch.allclose(out, padded_out[:, :seq_len], atol = 1e-4)
+
 @pytest.mark.parametrize('depth', (1, 2))
 @pytest.mark.parametrize('prenorm', (False, True))
 @pytest.mark.parametrize('shift_tokens', (False, True))

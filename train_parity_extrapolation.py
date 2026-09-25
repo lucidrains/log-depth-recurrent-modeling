@@ -55,7 +55,7 @@ for step in range(1, NUM_STEPS + 1):
 
 # evaluate length extrapolation, no window size override needed
 
-print(f"\nevaluating length extrapolation...\n")
+print("\nevaluating length extrapolation...\n")
 
 model.eval()
 

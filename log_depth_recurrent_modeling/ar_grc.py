@@ -35,6 +35,12 @@ def cast_tuple(t, length = 1):
 def divisible_by(num, den):
     return (num % den) == 0
 
+def normalize_memory(memory, num_layers):
+    if isinstance(memory, (LayerMemory, TreeMemory)):
+        return [memory]
+
+    return default(memory, [None] * num_layers)
+
 # sampling helpers
 
 def log(t, eps = 1e-20):
@@ -92,9 +98,8 @@ def token_shift(x):
 
     t, t_shift = x.chunk(2, dim = -1)
     t_shift = shift_right(t_shift, dim = 1)
-    out = cat((t, t_shift), dim = -1)
 
-    return inverse_pack(out)
+    return inverse_pack(cat((t, t_shift), dim = -1))
 
 # layer
 
@@ -146,14 +151,7 @@ class ARGRCLayer(Module):
 
         # unpack layer memory
 
-        tree_mem = None
-        prev_token = None
-
-        if exists(memory):
-            if isinstance(memory, LayerMemory):
-                tree_mem, prev_token = memory.tree, memory.prev_token
-            else:
-                tree_mem = memory
+        tree_mem, prev_token = (memory.tree, memory.prev_token) if isinstance(memory, LayerMemory) else (memory, None)
 
         # token shifting
 
@@ -172,13 +170,15 @@ class ARGRCLayer(Module):
 
         # tree memory carry and sweep
 
-        step = 0 if not exists(tree_mem) else tree_mem.step
-        subtrees = dict() if not exists(tree_mem) else dict(tree_mem.subtrees)
-
-        if exists(max_seq_len) and divisible_by(step, max_seq_len):
-            subtrees = dict()
+        step = tree_mem.step if exists(tree_mem) else 0
+        subtrees = dict(tree_mem.subtrees) if exists(tree_mem) else dict()
 
         window_step = step % max_seq_len if exists(max_seq_len) else step
+
+        # the merge tree resets at each window boundary
+
+        if window_step == 0:
+            subtrees = dict()
 
         # down-sweep carry: walk from root down to leaf at window_step
         # whenever branching right (bit is 1), absorb left sibling subtree
@@ -206,13 +206,14 @@ class ARGRCLayer(Module):
         subtrees[level] = subtree
 
         next_step = step + 1
-        window_completed = exists(max_seq_len) and divisible_by(next_step, max_seq_len)
 
-        if window_completed:
+        if exists(max_seq_len) and divisible_by(next_step, max_seq_len):
             subtrees = dict()
 
-        next_tree_mem = TreeMemory(step = next_step, subtrees = subtrees)
-        next_memory = LayerMemory(tree = next_tree_mem, prev_token = next_prev_token)
+        next_memory = LayerMemory(
+            tree = TreeMemory(step = next_step, subtrees = subtrees),
+            prev_token = next_prev_token
+        )
 
         return out, next_memory
 
@@ -262,15 +263,17 @@ class ARGRCLayer(Module):
         if self.prenorm:
             x = self.norm(x)
 
+        # window size is `max_seq_len` if given, otherwise the next power of two
+        # sequence is padded to a multiple of the window size, then the padding is stripped at the end
+
         window_size = default(self.max_seq_len, 2 ** max(1, math.ceil(math.log2(n))))
         tree_depth = int(math.log2(window_size))
 
         x, remove_padding = pad_at_dim_to_multiple(x, multiple = window_size, dim = -2)
 
-        # divide into window size
+        # fold sequence into windows
 
-        x = rearrange(x, 'b (w n) d -> b w n d', n = window_size)
-        x, inverse_pack_window = pack_with_inverse(x, '* n d')
+        x = rearrange(x, 'b (w n) d -> (b w) n d', n = window_size)
 
         # up sweep
 
@@ -278,30 +281,26 @@ class ARGRCLayer(Module):
         up_hiddens = [x]
 
         for _ in range(tree_depth - 1):
-            left, right = rearrange(curr, 'b (h two) d -> two b h d', two = 2)
+            left, right = rearrange(curr, 'bw (h two) d -> two bw h d', two = 2)
             curr = up_grc(left, right)
             up_hiddens.append(curr)
 
         # down sweep (blelloch)
 
-        curr = repeat(root_hidden, 'd -> b 1 d', b = x.shape[0])
+        curr = repeat(root_hidden, 'd -> bw 1 d', bw = x.shape[0])
 
         for up_hidden in reversed(up_hiddens):
-            left_up, _ = rearrange(up_hidden, 'b (h two) d -> two b h d', two = 2)
+            left_up, _ = rearrange(up_hidden, 'bw (h two) d -> two bw h d', two = 2)
             right_carry = down_grc(curr, left_up)
-            curr = rearrange([curr, right_carry], 'two b h d -> b (h two) d')
+            curr = rearrange([curr, right_carry], 'two bw h d -> bw (h two) d')
 
         # include each leaf
 
         x = down_grc(curr, x)
 
-        # restore window
+        # unfold windows and strip padding
 
-        x = inverse_pack_window(x)
-        x = rearrange(x, 'b w n d -> b (w n) d')
-
-        # slice out padding
-
+        x = rearrange(x, '(b w) n d -> b (w n) d', b = b)
         x = remove_padding(x)
 
         # extract memory from tree intermediates if requested
@@ -309,24 +308,25 @@ class ARGRCLayer(Module):
         next_memory = None
 
         if return_memory:
-            up_unpacked = [inverse_pack_window(h) for h in up_hiddens]
-
-            last_window = (n - 1) // window_size
-            window_step = n % window_size
-
             subtrees = dict()
-            has_subtrees = not divisible_by(n, window_size)
 
-            if has_subtrees:
-                for level in range(tree_depth):
-                    has_subtree = bool((window_step >> level) & 1)
+            if not divisible_by(n, window_size):
+                window_step = n % window_size
+                last_window = (n - 1) // window_size
 
-                    if has_subtree:
-                        node_idx = (window_step >> level) - 1
-                        subtrees[level] = up_unpacked[level][:, last_window, node_idx]
+                up_unpacked = [rearrange(h, '(b w) t d -> b w t d', b = b) for h in up_hiddens]
 
-            next_tree_mem = TreeMemory(step = n, subtrees = subtrees)
-            next_memory = LayerMemory(tree = next_tree_mem, prev_token = next_prev_token)
+                for level, up_hidden in enumerate(up_unpacked):
+                    if not ((window_step >> level) & 1):
+                        continue
+
+                    node_idx = (window_step >> level) - 1
+                    subtrees[level] = up_hidden[:, last_window, node_idx]
+
+            next_memory = LayerMemory(
+                tree = TreeMemory(step = n, subtrees = subtrees),
+                prev_token = next_prev_token
+            )
 
         if self.reverse_seq:
             x = x.flip(dims = (1,))
@@ -401,11 +401,7 @@ class AutoregressiveGatedRecursiveCell(Module):
         embed: Tensor,
         memory: list | tuple | None = None
     ):
-        b, d = embed.shape
-
-        memory = default(memory, [None] * len(self.layers))
-        if isinstance(memory, (LayerMemory, TreeMemory)):
-            memory = [memory]
+        memory = normalize_memory(memory, len(self.layers))
 
         next_memories = []
         x = embed
@@ -433,7 +429,7 @@ class AutoregressiveGatedRecursiveCell(Module):
         filter_thres = 0.9,
     ):
         prompt, inverse_pack = pack_with_inverse(prompt, '* n')
-        b, prompt_seq_len = prompt.shape
+        prompt_seq_len = prompt.shape[-1]
         sample_num_times = max(0, seq_len - prompt_seq_len)
 
         logits, memories = self(prompt, return_memory = True)
@@ -477,16 +473,12 @@ class AutoregressiveGatedRecursiveCell(Module):
         if return_loss and not exists(labels):
             ids, labels = ids[:, :-1], ids[:, 1:]
 
-        b, n = ids.shape
-
         embeds = self.token_embed(ids)
         x = self.embed_to_model(embeds)
 
         # handle memories for each layer
 
-        memory = default(memory, [None] * len(self.layers))
-        if isinstance(memory, (LayerMemory, TreeMemory)):
-            memory = [memory]
+        memory = normalize_memory(memory, len(self.layers))
 
         next_memories = []
 
