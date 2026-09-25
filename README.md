@@ -55,6 +55,16 @@ x = torch.randn(1, 65535, 128)
 out = layer(x) + x # (1, 65535, 128)
 ```
 
+Feed the sequence in chunks of varying length, carrying memory across calls (equivalent to one pass over the full sequence):
+
+```python
+memory = None
+
+for start, length in ((0, 3), (3, 5), (8, 2)):
+    chunk = x[:, start : start + length]
+    out, memory = layer(chunk, memory = memory, return_memory = True)
+```
+
 ## Tasks
 
 Run parity task with length generalization:
