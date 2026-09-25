@@ -1,7 +1,6 @@
 import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
-import math
 import gzip
 import random
 import tqdm
@@ -9,7 +8,6 @@ import numpy as np
 
 import torch
 from torch.optim import Adam
-from torch import Tensor, cat
 from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator
 
@@ -29,9 +27,6 @@ SEQ_LEN = 512
 
 # helpers
 
-def exists(v):
-    return v is not None
-
 def cycle(loader):
     while True:
         for data in loader:
@@ -42,53 +37,6 @@ def decode_token(token):
 
 def decode_tokens(tokens):
     return "".join(list(map(decode_token, tokens)))
-
-# sampling helpers
-
-def log(t, eps = 1e-20):
-    return torch.log(t.clamp(min = eps))
-
-def gumbel_noise(t):
-    noise = torch.zeros_like(t).uniform_(0, 1)
-    return -log(-log(noise))
-
-def gumbel_sample(t, temperature = 1., dim = -1, keepdim = True):
-    return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim, keepdim = keepdim)
-
-def top_k(logits, thres = 0.9):
-    k = math.ceil((1 - thres) * logits.shape[-1])
-    val, ind = torch.topk(logits, k)
-    probs = torch.full_like(logits, float('-inf'))
-    probs.scatter_(-1, ind, val)
-    return probs
-
-def base_decoding(
-    net,
-    prompt: Tensor,
-    seq_len: int,
-    temperature = 1.,
-    filter_thres = 0.9,
-):
-    b, prompt_seq_len = prompt.shape
-    sample_num_times = max(0, seq_len - prompt_seq_len)
-
-    logits, memory = net(prompt, return_memory = True)
-    logits = logits[:, -1]
-
-    sampled = []
-
-    for _ in range(sample_num_times):
-        logits = top_k(logits, thres = filter_thres)
-        sample = gumbel_sample(logits, temperature = temperature, dim = -1, keepdim = True)
-        sampled.append(sample)
-
-        logits, memory = net(sample, memory = memory, return_memory = True)
-        logits = logits[:, -1]
-
-    if len(sampled) == 0:
-        return prompt[:, :0]
-
-    return cat(sampled, dim = -1)
 
 # accelerators
 
@@ -179,7 +127,7 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval = 10.0, desc = "training"):
 
         prompt = inp[None, ...]
 
-        sampled = base_decoding(model, prompt, GENERATE_LENGTH)
+        sampled = accelerator.unwrap_model(model).generate(prompt, GENERATE_LENGTH)
 
         base_decode_output = decode_tokens(sampled[0])
 

@@ -26,6 +26,7 @@ def test_ar_grc(seq_len, max_seq_len):
 
     ids = torch.randint(0, 16, (2, seq_len))
     loss = model(ids, return_loss = True)
+    loss.backward()
 
     assert loss.ndim == 0
 
@@ -38,7 +39,8 @@ def test_ar_grc(seq_len, max_seq_len):
 @pytest.mark.parametrize('prenorm', (False, True))
 @pytest.mark.parametrize('shift_tokens', (False, True))
 @pytest.mark.parametrize('max_seq_len', (16, None))
-def test_argrc_layer_sequential_vs_parallel(prenorm, shift_tokens, max_seq_len):
+@pytest.mark.parametrize('prompt_len', (8, 10))
+def test_argrc_layer_sequential_vs_parallel(prenorm, shift_tokens, max_seq_len, prompt_len):
     from log_depth_recurrent_modeling import ARGRCLayer
 
     layer = ARGRCLayer(
@@ -57,7 +59,6 @@ def test_argrc_layer_sequential_vs_parallel(prenorm, shift_tokens, max_seq_len):
 
     # prompt parallel with memory, then sequential continuation
 
-    prompt_len = 10
     prompt_out, memory = layer(x[:, :prompt_len], return_memory = True)
 
     seq_out, _ = layer(x[:, prompt_len:], memory = memory, return_memory = True)

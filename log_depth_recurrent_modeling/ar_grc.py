@@ -323,6 +323,10 @@ class ARGRCLayer(Module):
                     node_idx = (window_step >> level) - 1
                     subtrees[level] = up_hidden[:, last_window, node_idx]
 
+            elif not exists(self.max_seq_len):
+                left, right = rearrange(up_hiddens[-1], 'bw (h two) d -> two bw h d', two = 2)
+                subtrees[tree_depth] = up_grc(left, right)[:, 0]
+
             next_memory = LayerMemory(
                 tree = TreeMemory(step = n, subtrees = subtrees),
                 prev_token = next_prev_token
