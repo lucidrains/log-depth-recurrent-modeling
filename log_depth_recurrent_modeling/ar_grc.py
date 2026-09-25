@@ -1,16 +1,22 @@
 from __future__ import annotations
+from collections import namedtuple
 import math
 
 import torch
-from torch import nn
-from torch.nn import Module, Linear, RMSNorm, LayerNorm
+from torch import nn, Tensor, stack, cat
+from torch.nn import Module, ModuleList, Linear, RMSNorm, LayerNorm
 import torch.nn.functional as F
 
 from einops import einsum, rearrange, repeat
 
 from x_mlps_pytorch import create_mlp
 
-from torch_einops_utils import pad_at_dim_to_multiple, pack_with_inverse
+from torch_einops_utils import pad_at_dim_to_multiple, pack_with_inverse, shift_right, temp_eval
+
+# memory
+
+TreeMemory = namedtuple('TreeMemory', ['step', 'subtrees'])
+LayerMemory = namedtuple('LayerMemory', ['tree', 'prev_token'])
 
 # helper functions
 
@@ -22,6 +28,31 @@ def default(*args):
         if exists(arg):
             return arg
     return None
+
+def cast_tuple(t, length = 1):
+    return tuple(t) if isinstance(t, (tuple, list)) else ((t,) * length)
+
+def divisible_by(num, den):
+    return (num % den) == 0
+
+# sampling helpers
+
+def log(t, eps = 1e-20):
+    return torch.log(t.clamp(min = eps))
+
+def gumbel_noise(t):
+    noise = torch.zeros_like(t).uniform_(0, 1)
+    return -log(-log(noise))
+
+def gumbel_sample(t, temperature = 1., dim = -1, keepdim = True):
+    return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim, keepdim = keepdim)
+
+def top_k(logits, thres = 0.9):
+    k = math.ceil((1 - thres) * logits.shape[-1])
+    val, ind = torch.topk(logits, k)
+    probs = torch.full_like(logits, float('-inf'))
+    probs.scatter_(-1, ind, val)
+    return probs
 
 # classes
 
@@ -54,68 +85,184 @@ class GatedRecursiveCell(Module):
 
         return self.norm(x * x_gate.sigmoid() + y * y_gate.sigmoid() + c_gate.sigmoid() * c)
 
-# main class
+# token shift, Bo Peng RWKV
 
-class AutoregressiveGatedRecursiveCell(Module):
+def token_shift(x):
+    x, inverse_pack = pack_with_inverse(x, '* n d')
+
+    t, t_shift = x.chunk(2, dim = -1)
+    t_shift = shift_right(t_shift, dim = 1)
+    out = cat((t, t_shift), dim = -1)
+
+    return inverse_pack(out)
+
+# layer
+
+class ARGRCLayer(Module):
     def __init__(
         self,
-        *,
-        num_tokens,
-        dim_embed,
         dim,
+        *,
         max_seq_len: int | None = None,
+        prenorm = False,
+        shift_tokens = False,
+        reverse_seq = False,
+        cell: Module | tuple[Module, Module] | None = None,
         separate_grc = False,
         grc_kwargs: dict = dict()
     ):
         super().__init__()
-
         assert not exists(max_seq_len) or (isinstance(max_seq_len, int) and max_seq_len >= 2 and math.log2(max_seq_len).is_integer())
 
         self.dim = dim
-        self.dim_embed = dim_embed
-        self.logit_scale = dim_embed ** -0.5
-
-        # embed
-
-        self.token_embed = nn.Embedding(num_tokens, dim_embed)
-
-        # project to and from
-
-        self.embed_to_model = Linear(dim_embed, dim)
-        self.model_to_embed = Linear(dim, dim_embed)
-
-        # recursive tree, up and down (blelloch scan)
-
         self.max_seq_len = max_seq_len
+
+        self.prenorm = prenorm
+        self.norm = RMSNorm(dim) if prenorm else nn.Identity()
+
+        self.shift_tokens = shift_tokens
+        self.reverse_seq = reverse_seq
 
         self.root_hidden = nn.Parameter(torch.randn(dim) * 1e-2)
 
-        self.separate_grc = separate_grc
-        self.up_grc = GatedRecursiveCell(dim = dim, **grc_kwargs)
-        self.down_grc = GatedRecursiveCell(dim = dim, **grc_kwargs) if separate_grc else self.up_grc
+        # cell
+
+        up_grc, down_grc = cast_tuple(cell, 2)
+
+        self.up_grc = default(up_grc, GatedRecursiveCell(dim = dim, **grc_kwargs))
+        self.down_grc = default(down_grc, GatedRecursiveCell(dim = dim, **grc_kwargs) if separate_grc else self.up_grc)
+
+    # forward step for single token
+
+    def forward_step(
+        self,
+        embed: Tensor,
+        memory: LayerMemory | TreeMemory | None = None
+    ):
+        assert not self.reverse_seq, 'forward_step is not supported when reverse_seq is set to True'
+
+        b, d = embed.shape
+        max_seq_len = self.max_seq_len
+
+        # unpack layer memory
+
+        tree_mem = None
+        prev_token = None
+
+        if exists(memory):
+            if isinstance(memory, LayerMemory):
+                tree_mem, prev_token = memory.tree, memory.prev_token
+            else:
+                tree_mem = memory
+
+        # token shifting
+
+        next_prev_token = None
+
+        if self.shift_tokens:
+            t, t_shift = embed.chunk(2, dim = -1)
+            shifted = default(prev_token, torch.zeros_like(t_shift))
+            embed = cat((t, shifted), dim = -1)
+            next_prev_token = t_shift
+
+        # prenorm
+
+        if self.prenorm:
+            embed = self.norm(embed)
+
+        # tree memory carry and sweep
+
+        step = 0 if not exists(tree_mem) else tree_mem.step
+        subtrees = dict() if not exists(tree_mem) else dict(tree_mem.subtrees)
+
+        if exists(max_seq_len) and divisible_by(step, max_seq_len):
+            subtrees = dict()
+
+        window_step = step % max_seq_len if exists(max_seq_len) else step
+
+        # down-sweep carry: walk from root down to leaf at window_step
+        # whenever branching right (bit is 1), absorb left sibling subtree
+
+        carry = repeat(self.root_hidden, 'd -> b d', b = b)
+
+        for level in sorted(subtrees.keys(), reverse = True):
+            has_left_sibling = bool((window_step >> level) & 1)
+
+            if has_left_sibling:
+                carry = self.down_grc(carry, subtrees[level])
+
+        out = self.down_grc(carry, embed)
+
+        # up-sweep: merge completed subtrees
+
+        subtree = embed
+        level = 0
+
+        while level in subtrees:
+            left_subtree = subtrees.pop(level)
+            subtree = self.up_grc(left_subtree, subtree)
+            level += 1
+
+        subtrees[level] = subtree
+
+        next_step = step + 1
+        window_completed = exists(max_seq_len) and divisible_by(next_step, max_seq_len)
+
+        if window_completed:
+            subtrees = dict()
+
+        next_tree_mem = TreeMemory(step = next_step, subtrees = subtrees)
+        next_memory = LayerMemory(tree = next_tree_mem, prev_token = next_prev_token)
+
+        return out, next_memory
+
+    # forward
 
     def forward(
         self,
-        ids,
-        return_loss = False,
-        labels = None
+        x,
+        memory: LayerMemory | TreeMemory | None = None,
+        return_memory = False
     ):
+        b, n, d = x.shape
+
+        if self.reverse_seq:
+            assert not exists(memory) and not return_memory, 'memory and decoding is not supported with reverse_seq'
+            x = x.flip(dims = (1,))
+
+        # sequential with tree memory if memory passed in
+
+        if exists(memory):
+            hiddens = []
+            curr_memory = memory
+
+            for embed in x.unbind(dim = 1):
+                hidden, curr_memory = self.forward_step(embed, curr_memory)
+                hiddens.append(hidden)
+
+            # stack outputs
+
+            out = stack(hiddens, dim = 1)
+            return (out, curr_memory) if return_memory else out
+
+        # parallel blelloch scan
+
         up_grc, down_grc, root_hidden = self.up_grc, self.down_grc, self.root_hidden
 
-        if exists(labels):
-            return_loss = True
+        # token shifting
 
-        if return_loss and not exists(labels):
-            ids, labels = ids[:, :-1], ids[:, 1:]
+        next_prev_token = None
 
-        embeds = self.token_embed(ids)
+        if self.shift_tokens:
+            next_prev_token = x[:, -1, (d // 2):]
+            x = token_shift(x)
 
-        x = self.embed_to_model(embeds)
+        # prenorm
 
-        # window size is `max_seq_len` when set, folding the sequence into windows
-        # otherwise, auto pad to the nearest power of two and scan the whole sequence in log depth
+        if self.prenorm:
+            x = self.norm(x)
 
-        window_size = default(self.max_seq_len, 2 ** max(1, math.ceil(math.log2(x.shape[-2]))))
+        window_size = default(self.max_seq_len, 2 ** max(1, math.ceil(math.log2(n))))
         tree_depth = int(math.log2(window_size))
 
         x, remove_padding = pad_at_dim_to_multiple(x, multiple = window_size, dim = -2)
@@ -131,21 +278,17 @@ class AutoregressiveGatedRecursiveCell(Module):
         up_hiddens = [x]
 
         for _ in range(tree_depth - 1):
-
             left, right = rearrange(curr, 'b (h two) d -> two b h d', two = 2)
             curr = up_grc(left, right)
-
             up_hiddens.append(curr)
 
         # down sweep (blelloch)
 
         curr = repeat(root_hidden, 'd -> b 1 d', b = x.shape[0])
 
-        for _ in range(tree_depth):
-            left_up, _ = rearrange(up_hiddens.pop(), 'b (h two) d -> two b h d', two = 2)
-
+        for up_hidden in reversed(up_hiddens):
+            left_up, _ = rearrange(up_hidden, 'b (h two) d -> two b h d', two = 2)
             right_carry = down_grc(curr, left_up)
-
             curr = rearrange([curr, right_carry], 'two b h d -> b (h two) d')
 
         # include each leaf
@@ -161,14 +304,219 @@ class AutoregressiveGatedRecursiveCell(Module):
 
         x = remove_padding(x)
 
-        embeds = self.model_to_embed(x)
+        # extract memory from tree intermediates if requested
 
+        next_memory = None
+
+        if return_memory:
+            up_unpacked = [inverse_pack_window(h) for h in up_hiddens]
+
+            last_window = (n - 1) // window_size
+            window_step = n % window_size
+
+            subtrees = dict()
+            has_subtrees = not divisible_by(n, window_size)
+
+            if has_subtrees:
+                for level in range(tree_depth):
+                    has_subtree = bool((window_step >> level) & 1)
+
+                    if has_subtree:
+                        node_idx = (window_step >> level) - 1
+                        subtrees[level] = up_unpacked[level][:, last_window, node_idx]
+
+            next_tree_mem = TreeMemory(step = n, subtrees = subtrees)
+            next_memory = LayerMemory(tree = next_tree_mem, prev_token = next_prev_token)
+
+        if self.reverse_seq:
+            x = x.flip(dims = (1,))
+
+        if not return_memory:
+            return x
+
+        return x, next_memory
+
+# main model class
+
+class AutoregressiveGatedRecursiveCell(Module):
+    def __init__(
+        self,
+        *,
+        num_tokens,
+        dim = None,
+        dim_embed = None,
+        depth = 1,
+        max_seq_len: int | None = None,
+        prenorm = False,
+        residual = True,
+        shift_tokens = False,
+        reverse_seq = False,
+        cell: Module | tuple[Module, Module] | None = None,
+        separate_grc = False,
+        grc_kwargs: dict = dict()
+    ):
+        super().__init__()
+
+        dim, dim_embed = default(dim, dim_embed), default(dim_embed, dim)
+        assert exists(dim), 'dim must be specified'
+
+        self.dim = dim
+        self.dim_embed = dim_embed
+        self.depth = depth
+        self.residual = residual
+        self.logit_scale = dim_embed ** -0.5
+
+        # embed
+
+        self.token_embed = nn.Embedding(num_tokens, dim_embed)
+
+        # project to and from
+
+        self.embed_to_model = Linear(dim_embed, dim)
+        self.model_to_embed = Linear(dim, dim_embed)
+
+        # layers
+
+        reverse_seq = cast_tuple(reverse_seq, depth)
+
+        self.layers = ModuleList([
+            ARGRCLayer(
+                dim = dim,
+                max_seq_len = max_seq_len,
+                prenorm = prenorm,
+                shift_tokens = shift_tokens,
+                reverse_seq = layer_reverse_seq,
+                cell = cell,
+                separate_grc = separate_grc,
+                grc_kwargs = grc_kwargs
+            ) for layer_reverse_seq in reverse_seq
+        ])
+
+        self.norm = RMSNorm(dim) if prenorm else nn.Identity()
+
+    # forward step for decoding with tree memory
+
+    def forward_step(
+        self,
+        embed: Tensor,
+        memory: list | tuple | None = None
+    ):
+        b, d = embed.shape
+
+        memory = default(memory, [None] * len(self.layers))
+        if isinstance(memory, (LayerMemory, TreeMemory)):
+            memory = [memory]
+
+        next_memories = []
+        x = embed
+
+        for layer, layer_memory in zip(self.layers, memory):
+            out, next_layer_memory = layer.forward_step(x, layer_memory)
+            next_memories.append(next_layer_memory)
+
+            if self.residual:
+                out = out + x
+
+            x = out
+
+        return x, next_memories
+
+    # generate
+
+    @torch.no_grad()
+    @temp_eval
+    def generate(
+        self,
+        prompt: Tensor,
+        seq_len: int,
+        temperature = 1.,
+        filter_thres = 0.9,
+    ):
+        prompt, inverse_pack = pack_with_inverse(prompt, '* n')
+        b, prompt_seq_len = prompt.shape
+        sample_num_times = max(0, seq_len - prompt_seq_len)
+
+        logits, memories = self(prompt, return_memory = True)
+        logits = logits[:, -1]
+
+        generated = []
+
+        for _ in range(sample_num_times):
+            logits = top_k(logits, thres = filter_thres)
+            sample = gumbel_sample(logits, temperature = temperature, dim = -1, keepdim = True)
+            generated.append(sample)
+
+            embeds = self.token_embed(sample[:, 0])
+            embed = self.embed_to_model(embeds)
+
+            hidden, memories = self.forward_step(embed, memories)
+
+            hidden = self.norm(hidden)
+            embeds = self.model_to_embed(hidden)
+            logits = einsum(embeds, self.token_embed.weight, 'b d, l d -> b l') * self.logit_scale
+
+        out = cat(generated, dim = -1) if len(generated) > 0 else prompt[:, :0]
+        return inverse_pack(out, '* n')
+
+    # forward
+
+    def forward(
+        self,
+        ids,
+        return_loss = False,
+        labels = None,
+        memory: list | tuple | None = None,
+        return_memory = False
+    ):
+        ids, inverse_pack = pack_with_inverse(ids, '* n')
+
+        if exists(labels):
+            return_loss = True
+            labels, _ = pack_with_inverse(labels, '* n')
+
+        if return_loss and not exists(labels):
+            ids, labels = ids[:, :-1], ids[:, 1:]
+
+        b, n = ids.shape
+
+        embeds = self.token_embed(ids)
+        x = self.embed_to_model(embeds)
+
+        # handle memories for each layer
+
+        memory = default(memory, [None] * len(self.layers))
+        if isinstance(memory, (LayerMemory, TreeMemory)):
+            memory = [memory]
+
+        next_memories = []
+
+        for layer, layer_memory in zip(self.layers, memory):
+            if return_memory or exists(layer_memory):
+                out, next_layer_memory = layer(x, memory = layer_memory, return_memory = True)
+                next_memories.append(next_layer_memory)
+            else:
+                out = layer(x)
+
+            if self.residual:
+                out = out + x
+
+            x = out
+
+        # to logits
+
+        x = self.norm(x)
+        embeds = self.model_to_embed(x)
         logits = einsum(embeds, self.token_embed.weight, 'b n d, l d -> b n l') * self.logit_scale
 
-        if not return_loss:
-            return logits
+        if return_loss:
+            out = F.cross_entropy(rearrange(logits, 'b n l -> b l n'), labels, ignore_index = -1)
+        else:
+            out = inverse_pack(logits, '* n l')
 
-        return F.cross_entropy(rearrange(logits, 'b n l -> b l n'), labels, ignore_index = -1)
+        if not return_memory:
+            return out
+
+        return out, next_memories
 
 # alias
 

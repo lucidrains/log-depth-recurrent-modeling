@@ -1,58 +1,72 @@
 <img src="./ldrlm-fig1.png" width="350px"></img>
 
-## Log Depth Recurrent Modeling (wip)
+## Log Depth Recurrent Modeling - Pytorch
 
-Explorations into the [Log Depth Recurrent Modeling](https://arxiv.org/abs/2609.28212) proposed by Yiqin Wang of Imperial College London
+Explorations into the [Log Depth Recurrent Modeling](https://arxiv.org/abs/2609.28212) proposed by Yiqin Wang of Imperial College London.
 
-`AutoregressiveGatedRecursiveCell` scans a sequence in log depth by padding it to the nearest power of two and running a Blelloch scan over the resulting balanced binary tree, giving it length extrapolation for free. Setting `max_seq_len` (a power of two) pins the window size instead, padding and folding longer sequences into independent windows processed in parallel.
+## Install
+
+```bash
+$ pip install log-depth-recurrent-modeling
+```
 
 ## Usage
-
-Train on the parity task at sequence length 16, then extrapolate to unseen sequence lengths
 
 ```python
 import torch
 from log_depth_recurrent_modeling import ARGRC
 
-torch.manual_seed(42)
+model = ARGRC(
+    num_tokens = 256,
+    dim = 512,
+    depth = 2,
+    max_seq_len = 65536,
+    shift_tokens = True
+)
 
-model = ARGRC(num_tokens = 2, dim_embed = 32, dim = 32)
-opt = torch.optim.AdamW(model.parameters(), lr = 3e-3)
+tokens = torch.randint(0, 256, (2, 65536))
 
-def parity_batch(seq_len, batch_size = 64):
-    bits = torch.randint(0, 2, (batch_size, seq_len))
-    return bits, bits.cumsum(dim = -1) % 2
+# forward with parallel blelloch scan in log depth
 
-# train on sequences of length 16
+logits = model(tokens) # (2, 65536, 256)
 
-for step in range(1, 201):
-    bits, labels = parity_batch(16)
+# autoregressive cross entropy loss
 
-    loss = model(bits, labels = labels)
-    loss.backward()
-    opt.step()
-    opt.zero_grad()
-
-    if step % 50 == 0:
-        print(f"step {step:3d} | loss: {loss.item():.4f}")
-
-# extrapolate to unseen sequence lengths
-
-for seq_len in (16, 64, 256, 1024):
-    bits, labels = parity_batch(seq_len, 100)
-    acc = (model(bits).argmax(dim = -1) == labels).float().mean().item()
-    print(f"seq len {seq_len:4d} | accuracy: {acc * 100:.1f}%")
+loss = model(tokens, return_loss = True)
+loss.backward()
 ```
 
+Standalone `ARGRCLayer`:
+
+```python
+import torch
+from log_depth_recurrent_modeling import ARGRCLayer
+
+layer = ARGRCLayer(
+    dim = 512,
+    max_seq_len = 65536,
+    prenorm = True,
+    shift_tokens = True,
+    separate_grc = False # shares up and down grc
+)
+
+x = torch.randn(2, 65536, 512)
+
+out = layer(x) # (2, 65536, 512)
 ```
-step  50 | loss: 0.6559
-step 100 | loss: 0.0003
-step 150 | loss: 0.0000
-step 200 | loss: 0.0000
-seq len   16 | accuracy: 100.0%
-seq len   64 | accuracy: 100.0%
-seq len  256 | accuracy: 100.0%
-seq len 1024 | accuracy: 100.0%
+
+## Tasks
+
+Run parity task with length generalization:
+
+```bash
+$ python train_parity_extrapolation.py
+```
+
+Run character language modeling on enwik8 with memory caching during generation:
+
+```bash
+$ python train_enwik8.py
 ```
 
 ## Citations
@@ -90,5 +104,18 @@ seq len 1024 | accuracy: 100.0%
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
     url       = {https://arxiv.org/abs/2605.26035},
+}
+```
+
+```bibtex
+@software{peng_bo_2021_5196578,
+    author    = {PENG Bo},
+    title     = {BlinkDL/RWKV-LM: 0.01},
+    month     = {aug},
+    year      = {2021},
+    publisher = {Zenodo},
+    version   = {0.01},
+    doi       = {10.5281/zenodo.5196578},
+    url       = {https://doi.org/10.5281/zenodo.5196578}
 }
 ```
