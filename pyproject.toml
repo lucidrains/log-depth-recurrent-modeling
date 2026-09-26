@@ -1,6 +1,6 @@
 [project]
 name = "log-depth-recurrent-modeling"
-version = "0.1.2"
+version = "0.1.4"
 description = "Log Depth Recurrent Modeling"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -33,7 +33,12 @@ Homepage = "https://pypi.org/project/log-depth-recurrent-modeling/"
 Repository = "https://github.com/lucidrains/log-depth-recurrent-modeling"
 
 [project.optional-dependencies]
-examples = []
+examples = [
+    "accelerate>=1.15.0",
+    "fire>=0.7.1",
+    "numpy>=2.2.6",
+    "tqdm>=4.70.1",
+]
 test = [
     "pytest"
 ]
